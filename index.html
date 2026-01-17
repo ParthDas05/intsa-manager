@@ -214,6 +214,29 @@
             transform: translateY(-2px);
         }
 
+        .global-import-btn {
+            width: 100%;
+            padding: 12px;
+            background: var(--secondary);
+            color: white;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: var(--transition);
+            margin-top: 10px;
+        }
+
+        .global-import-btn:hover {
+            background: #3651d4;
+            transform: translateY(-2px);
+        }
+
         /* ========== CARDS & PANELS ========== */
         .card {
             background: var(--card);
@@ -1089,6 +1112,12 @@
                 <span>💾</span>
                 <span>Export All Data</span>
             </button>
+
+            <button class="global-import-btn" id="globalImportBtn">
+                <span>📂</span>
+                <span>Import Data</span>
+            </button>
+            <input type="file" id="importFileInput" accept=".json" style="display: none;">
         </aside>
 
         <!-- MAIN CONTENT -->
@@ -1253,6 +1282,10 @@
         <button class="mobile-nav-btn" id="mobileExportBtn">
             <span class="mobile-nav-btn-icon">💾</span>
             <span>Export</span>
+        </button>
+        <button class="mobile-nav-btn" id="mobileImportBtn">
+            <span class="mobile-nav-btn-icon">📂</span>
+            <span>Import</span>
         </button>
     </nav>
 
@@ -1933,6 +1966,241 @@
                 }
             };
 
+            // ========== IMPORT FUNCTIONALITY ==========
+            const Import = {
+                // Trigger file input
+                triggerFileSelect() {
+                    document.getElementById('importFileInput').click();
+                },
+
+                // Handle file selection
+                async handleFileSelect(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    // Validate file type
+                    if (!file.name.endsWith('.json')) {
+                        UI.showToast('Please select a valid JSON file', 'error');
+                        return;
+                    }
+
+                    try {
+                        const text = await this.readFileAsText(file);
+                        const data = JSON.parse(text);
+                        
+                        // Validate data structure
+                        if (!this.validateImportData(data)) {
+                            UI.showToast('Invalid backup file format', 'error');
+                            return;
+                        }
+
+                        // Ask user for import mode
+                        const shouldMerge = await UI.showConfirm(
+                            'Import Data',
+                            'Do you want to MERGE with existing data? Click "Confirm" to merge, or "Cancel" to replace all data.'
+                        );
+
+                        await this.importData(data, shouldMerge);
+                        
+                        // Reset file input
+                        event.target.value = '';
+                        
+                    } catch (e) {
+                        console.error('Import error:', e);
+                        UI.showToast('Failed to import data. Invalid file format.', 'error');
+                        event.target.value = '';
+                    }
+                },
+
+                // Read file as text
+                readFileAsText(file) {
+                    return new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result);
+                        reader.onerror = () => reject(reader.error);
+                        reader.readAsText(file);
+                    });
+                },
+
+                // Validate import data structure
+                validateImportData(data) {
+                    // Check for full backup format
+                    if (data.pages && Array.isArray(data.pages)) {
+                        return true;
+                    }
+                    // Check for single page backup format
+                    if (data.page && typeof data.page === 'object') {
+                        return true;
+                    }
+                    return false;
+                },
+
+                // Convert base64 to blob
+                base64ToBlob(base64) {
+                    try {
+                        const parts = base64.split(',');
+                        const mime = parts[0].match(/:(.*?);/)[1];
+                        const bstr = atob(parts[1]);
+                        let n = bstr.length;
+                        const u8arr = new Uint8Array(n);
+                        while (n--) {
+                            u8arr[n] = bstr.charCodeAt(n);
+                        }
+                        return new Blob([u8arr], { type: mime });
+                    } catch (e) {
+                        console.error('Error converting base64 to blob:', e);
+                        return null;
+                    }
+                },
+
+                // Import data
+                async importData(data, merge = false) {
+                    try {
+                        UI.showToast('Importing data...', 'warning');
+
+                        let pagesImported = 0;
+                        let imagesImported = 0;
+                        let postsImported = 0;
+
+                        // Check if it's a full backup or single page backup
+                        const isFullBackup = data.pages && Array.isArray(data.pages);
+                        const isSinglePage = data.page && typeof data.page === 'object';
+
+                        if (!merge) {
+                            // Clear existing data if not merging
+                            if (isFullBackup) {
+                                // Clear all data
+                                AppState.pages = [];
+                                AppState.calendarData = {};
+                                
+                                // Clear all images from IndexedDB
+                                const existingImages = await ImageDB.getAllImages();
+                                for (const img of existingImages) {
+                                    await ImageDB.deleteImage(img.id);
+                                }
+                            }
+                        }
+
+                        if (isFullBackup) {
+                            // Import pages
+                            for (const page of data.pages) {
+                                // Check if page already exists (by id)
+                                const existingIndex = AppState.pages.findIndex(p => p.id === page.id);
+                                
+                                if (existingIndex !== -1) {
+                                    if (merge) {
+                                        // Update existing page
+                                        AppState.pages[existingIndex] = { ...AppState.pages[existingIndex], ...page };
+                                    }
+                                } else {
+                                    // Add new page
+                                    AppState.pages.push(page);
+                                    pagesImported++;
+                                }
+                            }
+
+                            // Import calendar data
+                            if (data.calendarData) {
+                                for (const pageId in data.calendarData) {
+                                    if (merge && AppState.calendarData[pageId]) {
+                                        // Merge calendar data
+                                        AppState.calendarData[pageId] = {
+                                            ...AppState.calendarData[pageId],
+                                            ...data.calendarData[pageId]
+                                        };
+                                    } else {
+                                        AppState.calendarData[pageId] = data.calendarData[pageId];
+                                    }
+                                    postsImported += Object.keys(data.calendarData[pageId]).length;
+                                }
+                            }
+
+                            // Import images
+                            if (data.images && Array.isArray(data.images)) {
+                                for (const img of data.images) {
+                                    if (img.data) {
+                                        const blob = this.base64ToBlob(img.data);
+                                        if (blob) {
+                                            // Generate new ID if merging to avoid conflicts
+                                            const newId = merge ? UI.generateId() : img.id;
+                                            await ImageDB.saveImage(newId, blob, img.pageId, img.date);
+                                            imagesImported++;
+                                        }
+                                    }
+                                }
+                            }
+
+                        } else if (isSinglePage) {
+                            // Import single page
+                            const page = data.page;
+                            const existingIndex = AppState.pages.findIndex(p => p.id === page.id);
+                            
+                            if (existingIndex !== -1) {
+                                if (merge) {
+                                    AppState.pages[existingIndex] = { ...AppState.pages[existingIndex], ...page };
+                                } else {
+                                    AppState.pages[existingIndex] = page;
+                                }
+                            } else {
+                                AppState.pages.push(page);
+                                pagesImported++;
+                            }
+
+                            // Import calendar data for this page
+                            if (data.calendarData) {
+                                if (merge && AppState.calendarData[page.id]) {
+                                    AppState.calendarData[page.id] = {
+                                        ...AppState.calendarData[page.id],
+                                        ...data.calendarData
+                                    };
+                                } else {
+                                    AppState.calendarData[page.id] = data.calendarData;
+                                }
+                                postsImported = Object.keys(data.calendarData).length;
+                            }
+
+                            // Import images for this page
+                            if (data.images && Array.isArray(data.images)) {
+                                // If not merging, delete existing images for this page first
+                                if (!merge) {
+                                    await ImageDB.deleteImagesForPage(page.id);
+                                }
+                                
+                                for (const img of data.images) {
+                                    if (img.data) {
+                                        const blob = this.base64ToBlob(img.data);
+                                        if (blob) {
+                                            const newId = merge ? UI.generateId() : img.id;
+                                            await ImageDB.saveImage(newId, blob, img.pageId, img.date);
+                                            imagesImported++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Save to localStorage
+                        Storage.savePages(AppState.pages);
+                        Storage.saveCalendarData(AppState.calendarData);
+
+                        // Refresh UI
+                        App.render();
+                        App.updateStats();
+
+                        // Show success message
+                        const mode = merge ? 'merged' : 'imported';
+                        UI.showToast(
+                            `Successfully ${mode}! Pages: ${pagesImported}, Posts: ${postsImported}, Images: ${imagesImported}`,
+                            'success'
+                        );
+
+                    } catch (e) {
+                        console.error('Import error:', e);
+                        UI.showToast('Error during import. Some data may not have been imported.', 'error');
+                    }
+                }
+            };
+
             // ========== MAIN APP ==========
             const App = {
                 // Initialize app
@@ -1976,6 +2244,11 @@
                     // Global export
                     document.getElementById('globalExportBtn').addEventListener('click', () => Export.exportAll());
                     document.getElementById('mobileExportBtn').addEventListener('click', () => Export.exportAll());
+
+                    // Global import
+                    document.getElementById('globalImportBtn').addEventListener('click', () => Import.triggerFileSelect());
+                    document.getElementById('mobileImportBtn').addEventListener('click', () => Import.triggerFileSelect());
+                    document.getElementById('importFileInput').addEventListener('change', (e) => Import.handleFileSelect(e));
 
                     // Workspace buttons
                     document.getElementById('openCalendarBtn').addEventListener('click', () => {
